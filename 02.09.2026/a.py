@@ -1,34 +1,78 @@
 import sys
+import numpy as np
 import pandas as pd
-import chardet
 
-sys.stdout.reconfigure(encoding='utf-8') # Чинит вывод кириллицы в консоль
+sys.stdout.reconfigure(encoding='utf-8')
+pd.set_option('display.width', 1200)
 
-with open('data.txt', 'rb') as f: # Для узнавания кодировки файла(на всякий)
-    raw = f.read(100_000)          # читаем кусок файла
-    result = chardet.detect(raw)
-    print(result)  
+RATING_COLS = ['Комфорт места', 'Обсуживание на борту', 'Еда и напитки',
+               'Обслуживание на земле', 'Соотношение цены и качества', 'Развлечения']
+CAT_COLS = ['Страна', 'Тип самолета', 'Тип путешественника', 'Тип места',
+            'Маршрут', 'Рекомендую', 'Поездка подтверждена']
+DATE_COLS = ['Дата отзыва', 'Дата полета']
 
-data = pd.read_csv('data.txt',
-                    encoding='utf-8', # Кодировка для кириллицы файла
-                    sep=';', # разделитель в файле
-                    engine='python', # для обработки кавычек
-                    on_bad_lines='skip', # Если всё хреново лучше скипнуть
-                    )
+# ========== Блок 1. Загрузка и первичная обработка файла data.txt ==========
+data = pd.read_csv('data.txt', encoding='utf-8', sep=';',
+                   engine='python', on_bad_lines='warn')
+ROWS_RAW = len(data)
 
-# Отменяет обрезка длинных текстов отзывов
-pd.set_option('display.max_colwidth', 60) 
-pd.set_option('display.width', 1000)
+data.columns = [' '.join(c.split()) for c in data.columns]
+data = data.loc[:, ~data.columns.str.contains('^Unnamed')]
+data = data.replace('', np.nan)
 
-data.isnull().sum() # Проверка на пустые значения в колонках
+DUPES = int(data.duplicated().sum())
+data.drop_duplicates(inplace=True)
+ROWS_CLEAN = len(data)
 
-# Заполняем пустые значения в колонке на самое частое значение
-# data['column_name'].fillna(data['column_name'].mode()[0], inplace=True) 
-# Но это один из возможных вариантов, его лучше не использовать, а заменять на 0 и т.д., либо удалять строки с пустыми значениями, если их мало и они не важны
+for col in ['Заголовок отзыва', 'Содержание отзыва']:
+    data[col] = data[col].str.strip().fillna('(без текста)')
 
-data.drop_duplicates(inplace=True) # Удаляем дубликаты строк, если они есть
+def parse_date(value):
+    if pd.isna(value):
+        return pd.NaT
+    value = str(value).strip()
+    formats = ['%d.%m.%Y', '%d %B %Y', '%dst %B %Y',
+               '%dnd %B %Y', '%drd %B %Y', '%dth %B %Y', '%B %d, %Y']
+    for fmt in formats:
+        try:
+            return pd.to_datetime(value, format=fmt)
+        except ValueError:
+            continue
+    return pd.NaT
 
-filteder_data = data[data['Поездка подтверждена'] == 'Verified'] # Фильтруем данные по колонке, оставляем только подтверждённые поездки
+for col in DATE_COLS:
+    data[col] = data[col].apply(parse_date)
 
-print(data.columns.tolist())
-print(data.head())
+for col in RATING_COLS:
+    data[col] = pd.to_numeric(data[col], errors='coerce')
+MISSING_RATINGS = int(data[RATING_COLS].isna().sum().sum())
+for col in RATING_COLS:
+    data[col] = data[col].fillna(0)
+
+for col in CAT_COLS:
+    data[col] = data[col].fillna('Не указано')
+
+data['Общий рейтинг'] = data[RATING_COLS].sum(axis=1)
+
+# ========== Блок 2. Фильтр: оставляем только подтвержденные отзывы ==========
+verified = data[data['Поездка подтверждена'] == 'Verified'].copy()
+ROWS_VER = len(verified)
+
+# Убираем время из дат, оставляем только дату
+for col in DATE_COLS:
+    verified[col] = verified[col].dt.date
+
+# ========== Блок 4. Журнал обработки ==========
+print('=== ЖУРНАЛ ОБРАБОТКИ ===')
+print(f'Строк в исходном файле:          {ROWS_RAW}')
+print(f'Удалено дубликатов:              {DUPES}')
+print(f'Строк после очистки:             {ROWS_CLEAN}')
+print(f'Заменено пропусков рейтингов:    {MISSING_RATINGS}')
+print(f'Подтвержденных отзывов Verified: {ROWS_VER}')
+print(f'Доля Verified:                   {ROWS_VER / ROWS_CLEAN:.1%}')
+
+# ========== Блок 5. Экспорт в Excel ==========
+with pd.ExcelWriter('ba_data.xlsx', engine='openpyxl') as writer:
+    data.to_excel(writer, sheet_name='Все отзывы', index=False)
+    verified.to_excel(writer, sheet_name='Verified', index=False)
+print('Файл ba_data.xlsx сохранен.')
